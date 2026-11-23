@@ -119,3 +119,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
+    
+"""
+Eventos HTC activos: 0
+R_th = 1.5399 °C/W | tau_enf = 48.30 s | C_th = 31.36 J/°C
+"""
