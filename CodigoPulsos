@@ -144,3 +144,10 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
+    
+    """
+    Eventos PROCHOT: 0
+Tramo 1 (<325s) | R_th1 = 1.0708 °C/W | tau1 = 7.73 s | C_th1 = 7.22 J/°C
+Tramo 2 (>=325s) | R_th2 = 0.7764 °C/W | tau2 = 6.71 s | C_th2 = 8.64 J/°C
+    """
