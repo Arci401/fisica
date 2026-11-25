@@ -1,0 +1,146 @@
+from pathlib import Path
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from scipy.optimize import curve_fit
+
+COL_TEMP = "CPU (Tctl/Tdie) [°C]"
+COL_POTENCIA = "Potencia total de CPU [W]"
+COL_PROCHOT = "Desaceleración térmica (PROCHOT CPU) [Yes/No]"
+COL_TIEMPO = "TiempoSimulacion"
+
+
+def cargar_columnas_pulsos(ruta_csv: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Extrae TiempoSimulacion (s), temperatura, potencia y flag PROCHOT."""
+    df = pd.read_csv(ruta_csv, encoding="utf-8-sig")
+    t_s = pd.to_numeric(df[COL_TIEMPO], errors="coerce")
+    temp_c = pd.to_numeric(df[COL_TEMP], errors="coerce")
+    power_w = pd.to_numeric(df[COL_POTENCIA], errors="coerce")
+    prochot = (
+        df[COL_PROCHOT]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .eq("yes")
+        .astype(int)
+    )
+    validas = t_s.notna() & temp_c.notna() & power_w.notna()
+    return (
+        t_s[validas].to_numpy(dtype=float),
+        temp_c[validas].to_numpy(dtype=float),
+        power_w[validas].to_numpy(dtype=float),
+        prochot[validas].to_numpy(dtype=int),
+    )
+
+
+def promedio_en_ventana(t_s: np.ndarray, senal: np.ndarray, t_ini: float, t_fin: float) -> float:
+    """Promedio de una señal en [t_ini, t_fin]."""
+    mascara = (t_s >= t_ini) & (t_s <= t_fin)
+    if not np.any(mascara):
+        raise ValueError(f"Sin muestras en [{t_ini}, {t_fin}] s.")
+    return float(np.mean(senal[mascara]))
+
+
+def r_termica(t_carga: float, t_reposo: float, p_carga: float, p_reposo: float) -> float:
+    """R_th = (T_carga - T_reposo) / (P_carga - P_reposo)."""
+    dp = p_carga - p_reposo
+    if np.isclose(dp, 0.0):
+        raise ValueError("Delta P cercano a 0.")
+    return (t_carga - t_reposo) / dp
+
+
+def curva_exponencial(t_rel: np.ndarray, t_eq: float, t_ini: float, tau: float) -> np.ndarray:
+    """T(t_rel) = T_eq + (T_ini - T_eq) * exp(-t_rel / tau)."""
+    return t_eq + (t_ini - t_eq) * np.exp(-t_rel / tau)
+
+
+def ajustar_tau(
+    t_rel: np.ndarray, temp_tramo: np.ndarray, tau_semilla: float = 10.0
+) -> tuple[float, float, float]:
+    """Ajusta tau, T_ini y T_eq sobre un tramo."""
+    popt, _ = curve_fit(
+        lambda x, t_eq, t_ini, tau: curva_exponencial(x, t_eq, t_ini, tau),
+        t_rel,
+        temp_tramo,
+        p0=[float(temp_tramo[-1]), float(temp_tramo[0]), tau_semilla],
+        bounds=([0.0, 0.0, 0.1], [130.0, 130.0, 3000.0]),
+        maxfev=20000,
+    )
+    return float(popt[2]), float(popt[1]), float(popt[0])
+
+
+def c_termica(tau: float, r_th: float) -> float:
+    """C_th = tau / R_th."""
+    return tau / r_th
+
+
+def graficar_por_tramos(
+    t_s: np.ndarray,
+    temp_c: np.ndarray,
+    power_w: np.ndarray,
+    t_corte: float,
+    salida: Path,
+) -> None:
+    """Grafica temperatura y potencia separando los dos tramos de alimentación."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+
+    ax1.axvspan(t_s[0], t_corte, color="#e6f2ff", alpha=0.5, label=f"Tramo 1 (< {int(t_corte)} s)")
+    ax1.axvspan(t_corte, t_s[-1], color="#fff2e6", alpha=0.5, label=f"Tramo 2 (≥ {int(t_corte)} s)")
+    ax1.plot(t_s, temp_c, color="#1f77b4", lw=1.4, label=COL_TEMP)
+    ax1.axvline(t_corte, color="#d62728", ls="--", lw=1.2, label=f"Cambio ({int(t_corte)} s)")
+    ax1.set_ylabel("Temperatura [°C]")
+    ax1.set_title("Pulsos con dos regímenes de alimentación")
+    ax1.legend(fontsize=8)
+    ax1.grid(True, alpha=0.3)
+
+    ax2.axvspan(t_s[0], t_corte, color="#e6f2ff", alpha=0.5)
+    ax2.axvspan(t_corte, t_s[-1], color="#fff2e6", alpha=0.5)
+    ax2.plot(t_s, power_w, color="#ff7f0e", lw=1.2, label=COL_POTENCIA)
+    ax2.axvline(t_corte, color="#d62728", ls="--", lw=1.2)
+    ax2.set_xlabel("TiempoSimulacion [s]")
+    ax2.set_ylabel("Potencia [W]")
+    ax2.legend(fontsize=8)
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(salida, dpi=150)
+    plt.close(fig)
+
+
+def main() -> None:
+    ruta_csv = Path("pulsos.CSV")
+    t_corte = 325.0
+
+    t_s, temp_c, power_w, prochot = cargar_columnas_pulsos(ruta_csv)
+
+    # Tramo 1 (< t_corte)
+    r1 = r_termica(
+        promedio_en_ventana(t_s, temp_c, 115.0, 119.0),
+        promedio_en_ventana(t_s, temp_c, 55.0, 59.0),
+        promedio_en_ventana(t_s, power_w, 115.0, 119.0),
+        promedio_en_ventana(t_s, power_w, 55.0, 59.0),
+    )
+    m_enf1 = (t_s >= 121.0) & (t_s <= 179.0)
+    tau1, _, _ = ajustar_tau(t_s[m_enf1] - 121.0, temp_c[m_enf1], tau_semilla=10.0)
+    c1 = c_termica(tau1, r1)
+
+    # Tramo 2 (>= t_corte): ejemplo con pulso [475..479] vs [415..419] y enfriamiento [481..539]
+    r2 = r_termica(
+        promedio_en_ventana(t_s, temp_c, 475.0, 479.0),
+        promedio_en_ventana(t_s, temp_c, 415.0, 419.0),
+        promedio_en_ventana(t_s, power_w, 475.0, 479.0),
+        promedio_en_ventana(t_s, power_w, 415.0, 419.0),
+    )
+    m_enf2 = (t_s >= 481.0) & (t_s <= 539.0)
+    tau2, _, _ = ajustar_tau(t_s[m_enf2] - 481.0, temp_c[m_enf2], tau_semilla=10.0)
+    c2 = c_termica(tau2, r2)
+
+    graficar_por_tramos(t_s, temp_c, power_w, t_corte, Path("pulsos_dos_tramos.png"))
+
+    print(f"Eventos PROCHOT: {int(np.sum(prochot))}")
+    print(f"Tramo 1 (<{t_corte:.0f}s) | R_th1 = {r1:.4f} °C/W | tau1 = {tau1:.2f} s | C_th1 = {c1:.2f} J/°C")
+    print(f"Tramo 2 (>={t_corte:.0f}s) | R_th2 = {r2:.4f} °C/W | tau2 = {tau2:.2f} s | C_th2 = {c2:.2f} J/°C")
+
+
+if __name__ == "__main__":
+    main()
